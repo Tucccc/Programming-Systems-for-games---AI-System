@@ -21,6 +21,12 @@ public class PatrolState : IState
 
     public void Tick(float deltaTime)
     {
+        if (enemy.CanSeePlayer())
+        {
+            enemy.GoToChase();
+            return;
+        }
+
         var points = enemy.patrolPoints;
         if (points == null || points.Length == 0)
             return;
