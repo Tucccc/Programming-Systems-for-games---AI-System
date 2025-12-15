@@ -53,23 +53,22 @@ public class ChaseState : IState
             return;
         }
 
-        enemy.MoveTowards(targetPos, deltaTime);
+        // Always chase the live player position in Chase
+        Vector3 moveTarget = enemy.GetMoveTargetWithDetour(enemy.player.position, deltaTime);
+        enemy.MoveTowards(moveTarget, deltaTime);
 
-        // Lost sight timer: only counts when we CAN'T see the player
-        if (!canSee)
+        // Lost sight timer only affects when we give up / investigate
+        if (!enemy.debugCanSeePlayer)
         {
             lostTimer += deltaTime;
-
             if (lostTimer >= enemy.lostTimeBeforeReturn)
-            {
-                // Go investigate/search instead of magically chasing through walls
                 enemy.GoToInvestigate();
-            }
         }
         else
         {
             lostTimer = 0f;
         }
+
     }
 
     public void Exit()

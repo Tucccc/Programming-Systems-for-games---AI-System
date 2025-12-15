@@ -15,8 +15,8 @@ public class PlayerMovement : MonoBehaviour
 
     void Update()
     {
-        moveX = Input.GetAxis("Horizontal"); // A/D
-        moveZ = Input.GetAxis("Vertical");   // W/S
+        moveX = Input.GetAxis("Horizontal");
+        moveZ = Input.GetAxis("Vertical");
     }
 
     void FixedUpdate()

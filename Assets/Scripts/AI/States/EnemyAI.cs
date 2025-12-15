@@ -21,11 +21,9 @@ public class EnemyAI : MonoBehaviour
     [Range(0f, 180f)] public float viewAngle = 90f;
     public LayerMask obstacleMask;
 
-    [Header("Obstacle Avoidance Tuning")]
-    public float avoidRayLength = 1.5f;
-    [Range(0, 8)] public int sideRaysPerSide = 1;     // 0 allowed in inspector, but clamped internally
-    [Range(5f, 90f)] public float sideRaySpreadAngle = 45f;
-    public float steerBias = 0.2f;
+    [Header("Wall Clearance / Sliding")]
+    public float wallClearance = 0.15f;
+    [Range(1, 4)] public int slideIterations = 2;
 
     [Header("Attack")]
     public float attackRange = 1.8f;
@@ -35,10 +33,17 @@ public class EnemyAI : MonoBehaviour
     public float investigateSearchTime = 2.0f;
 
     [Header("Memory")]
-    public float lastSeenUpdateDelay = 0.2f; // "ping" delay
+    public float lastSeenUpdateDelay = 0.2f;
     public Vector3 lastSeenPlayerPos { get; private set; }
     public bool hasLastSeenPos { get; private set; }
     private float lastSeenDelayTimer;
+
+    [Header("Wall-Edge Detour (Raycast-based)")]
+    public float blockRayHeight = 0.8f;
+    public float blockRayMaxDistance = 25f;
+    public float edgeSampleStep = 0.5f;
+    public int edgeSampleCount = 20;
+    public float edgeOffsetFromWall = 0.6f;
 
     [Header("Debug")]
     public string currentStateName;
@@ -50,21 +55,27 @@ public class EnemyAI : MonoBehaviour
     public float previewStepTime = 0.08f;
     public float previewTurnSpeedMultiplier = 1f;
 
-    // Debug steering info (for gizmos)
-    private Vector3 debugDesiredDir;
-    private Vector3 debugSteerDir;
+    [Header("Debug Wall-Edge Detour")]
+    public bool debugDrawEdgeSamples = true;
 
-    // Debug move target (what the AI is actually moving toward)
+    // Debug move target (what MoveTowards last aimed at)
     public Vector3 debugMoveTarget { get; private set; }
     public bool hasDebugMoveTarget { get; private set; }
-    public void SetDebugMoveTarget(Vector3 pos)
-    {
-        debugMoveTarget = pos;
-        hasDebugMoveTarget = true;
-    }
 
-    // Other
+    // Debug wall-edge detour visuals
+    private Vector3 debugBlockRayStart, debugBlockRayEnd;
+    private bool debugPathBlocked;
+    private Vector3 debugChosenDetour;
+    private bool debugHasDetour;
+    private Vector3[] debugLeftSamples;
+    private Vector3[] debugRightSamples;
+    private int debugLeftCount, debugRightCount;
+
+    // Components
     private Rigidbody rb;
+    private CapsuleCollider capsule;
+
+    // FSM
     public StateMachine fsm { get; private set; }
 
     // States
@@ -73,6 +84,13 @@ public class EnemyAI : MonoBehaviour
     private ChaseState chaseState;
     private AttackState attackState;
     private InvestigateState investigateState;
+
+    // Detour internals
+    private bool usingDetour;
+    private Vector3 detourPoint;
+
+    public bool IsDetouring => usingDetour;
+    public Vector3 DetourPoint => detourPoint;
 
     private void Awake()
     {
@@ -86,9 +104,11 @@ public class EnemyAI : MonoBehaviour
 
         rb = GetComponent<Rigidbody>();
         if (rb == null)
-        {
-            Debug.LogError("EnemyAI: No Rigidbody found. Add a Rigidbody to the Enemy (Is Kinematic = true recommended).");
-        }
+            Debug.LogError("EnemyAI: No Rigidbody found. Add one to the Enemy.");
+
+        capsule = GetComponent<CapsuleCollider>();
+        if (capsule == null)
+            Debug.LogWarning("EnemyAI: No CapsuleCollider found. Wall sliding will fall back to SphereCast.");
     }
 
     private void Start()
@@ -99,25 +119,32 @@ public class EnemyAI : MonoBehaviour
         if (patrolPoints == null || patrolPoints.Length == 0)
             Debug.LogWarning("EnemyAI: No patrol points set. Add some to patrolPoints in Inspector.");
 
+        usingDetour = false;
+        detourPoint = transform.position;
+
         fsm.ChangeState(idleState);
     }
 
-    // Tick ONLY here (physics step), since we use Rigidbody.MovePosition.
     private void FixedUpdate()
     {
         float dt = Time.fixedDeltaTime;
 
-        // Cache visibility once per physics tick (prevents flip-flop/jitter)
+        // Cache vision once per physics step
         debugCanSeePlayer = CanSeePlayer();
 
-        // Update memory and state machine once
         UpdateLastSeen(dt);
         fsm.Tick(dt);
     }
 
     // -----------------------------
-    // Movement helpers
+    // Movement
     // -----------------------------
+
+    public void SetDebugMoveTarget(Vector3 pos)
+    {
+        debugMoveTarget = pos;
+        hasDebugMoveTarget = true;
+    }
 
     public void MoveTowards(Vector3 targetPosition, float deltaTime)
     {
@@ -130,19 +157,23 @@ public class EnemyAI : MonoBehaviour
             return;
 
         Vector3 desiredDir = toTarget.normalized;
-        Vector3 steerDir = GetSteeringDirection(desiredDir);
 
-        // Rotate towards steering direction
-        Quaternion targetRot = Quaternion.LookRotation(steerDir, Vector3.up);
+        // Rotate towards desired direction
+        Quaternion targetRot = Quaternion.LookRotation(desiredDir, Vector3.up);
         transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, turnSpeed * deltaTime);
 
-        // Move forward (physics-friendly)
+        // Desired forward step
         Vector3 step = transform.forward * (moveSpeed * deltaTime);
 
         if (rb != null)
-            rb.MovePosition(rb.position + step);
+        {
+            Vector3 finalMove = ResolveWallSlideMove(rb.position, transform.rotation, step);
+            rb.MovePosition(rb.position + finalMove);
+        }
         else
-            transform.position += step; // fallback
+        {
+            transform.position += step;
+        }
     }
 
     public void FaceTowards(Vector3 targetPosition, float deltaTime)
@@ -178,11 +209,9 @@ public class EnemyAI : MonoBehaviour
 
         Vector3 dir = toPlayer.normalized;
 
-        // FOV check
         float angle = Vector3.Angle(transform.forward, dir);
         if (angle > viewAngle * 0.5f) return false;
 
-        // Line of sight check (walls block vision)
         if (Physics.Raycast(origin, dir, dist, obstacleMask))
             return false;
 
@@ -199,7 +228,7 @@ public class EnemyAI : MonoBehaviour
     }
 
     // -----------------------------
-    // Memory: last seen position
+    // Memory
     // -----------------------------
 
     public void UpdateLastSeen(float deltaTime)
@@ -222,95 +251,241 @@ public class EnemyAI : MonoBehaviour
         }
     }
 
-    // -----------------------------
-    // Obstacle avoidance (scalable rays)
-    // -----------------------------
-
-    public Vector3 GetSteeringDirection(Vector3 desiredDir)
+    public void ForceLastSeen(Vector3 pos)
     {
-        Vector3 origin = transform.position + Vector3.up * 0.8f;
-        debugDesiredDir = desiredDir;
-
-        // Forward test
-        if (!Physics.Raycast(origin, desiredDir, avoidRayLength, obstacleMask))
-        {
-            debugSteerDir = desiredDir;
-            return desiredDir;
-        }
-
-        int rays = Mathf.Max(1, sideRaysPerSide);
-
-        Vector3 bestDir = desiredDir;
-        float bestScore = float.NegativeInfinity;
-
-        for (int i = 1; i <= rays; i++)
-        {
-            float t = i / (float)rays;
-            float angle = Mathf.Lerp(0f, sideRaySpreadAngle, t);
-
-            Vector3 leftDir = Quaternion.AngleAxis(-angle, Vector3.up) * desiredDir;
-            Vector3 rightDir = Quaternion.AngleAxis(angle, Vector3.up) * desiredDir;
-
-            bool leftBlocked = Physics.Raycast(origin, leftDir, avoidRayLength, obstacleMask);
-            bool rightBlocked = Physics.Raycast(origin, rightDir, avoidRayLength, obstacleMask);
-
-            if (!leftBlocked)
-            {
-                float score = Vector3.Dot(transform.forward, leftDir) + steerBias;
-                if (score > bestScore) { bestScore = score; bestDir = leftDir; }
-            }
-
-            if (!rightBlocked)
-            {
-                float score = Vector3.Dot(transform.forward, rightDir) + steerBias;
-                if (score > bestScore) { bestScore = score; bestDir = rightDir; }
-            }
-        }
-
-        debugSteerDir = (bestScore > float.NegativeInfinity) ? bestDir : desiredDir;
-        return debugSteerDir;
+        lastSeenPlayerPos = pos;
+        hasLastSeenPos = true;
+        lastSeenDelayTimer = 0f;
     }
 
-    // Used by predicted path gizmo (doesn't depend on transform.forward)
-    private Vector3 GetSteeringDirectionFrom(Vector3 pos, Quaternion rot, Vector3 desiredDir)
+    // -----------------------------
+    // Detour: wall-edge waypoint
+    // -----------------------------
+
+    public Vector3 GetMoveTargetWithDetour(Vector3 finalTarget, float deltaTime)
     {
-        Vector3 origin = pos + Vector3.up * 0.8f;
-
-        if (!Physics.Raycast(origin, desiredDir, avoidRayLength, obstacleMask))
-            return desiredDir;
-
-        int rays = Mathf.Max(1, sideRaysPerSide);
-
-        Vector3 bestDir = desiredDir;
-        float bestScore = float.NegativeInfinity;
-
-        Vector3 forward = rot * Vector3.forward;
-
-        for (int i = 1; i <= rays; i++)
+        // If we’re currently going to a detour point, keep doing it until reached
+        if (usingDetour)
         {
-            float t = i / (float)rays;
-            float angle = Mathf.Lerp(0f, sideRaySpreadAngle, t);
+            if (IsAtPosition(detourPoint))
+                usingDetour = false;
+            else
+                return detourPoint;
+        }
 
-            Vector3 leftDir = Quaternion.AngleAxis(-angle, Vector3.up) * desiredDir;
-            Vector3 rightDir = Quaternion.AngleAxis(angle, Vector3.up) * desiredDir;
+        // If the direct route is blocked, try to create a detour waypoint around the wall
+        if (TryFindDetourByWallEdge(finalTarget, out Vector3 edgeDetour))
+        {
+            usingDetour = true;
+            detourPoint = edgeDetour;
+            return detourPoint;
+        }
 
-            bool leftBlocked = Physics.Raycast(origin, leftDir, avoidRayLength, obstacleMask);
-            bool rightBlocked = Physics.Raycast(origin, rightDir, avoidRayLength, obstacleMask);
+        return finalTarget;
+    }
 
-            if (!leftBlocked)
+    public bool TryFindDetourByWallEdge(Vector3 finalTarget, out Vector3 detourPointOut)
+    {
+        detourPointOut = Vector3.zero;
+
+        Vector3 origin = transform.position + Vector3.up * blockRayHeight;
+        Vector3 target = finalTarget + Vector3.up * blockRayHeight;
+        Vector3 toTarget = target - origin;
+
+        if (toTarget.sqrMagnitude < 0.0001f) return false;
+
+        float distToTarget = Mathf.Min(blockRayMaxDistance, toTarget.magnitude);
+        Vector3 dirToTarget = toTarget.normalized;
+
+        // Debug ray
+        debugBlockRayStart = origin;
+        debugBlockRayEnd = origin + dirToTarget * distToTarget;
+
+        // If nothing blocks LOS to finalTarget, no detour needed
+        debugPathBlocked = Physics.Raycast(origin, dirToTarget, out RaycastHit hit, distToTarget, obstacleMask);
+        if (!debugPathBlocked)
+        {
+            debugHasDetour = false;
+            return false;
+        }
+
+        Vector3 hitPoint = hit.point;
+        Vector3 normal = hit.normal; normal.y = 0f;
+        if (normal.sqrMagnitude < 0.0001f) return false;
+        normal.Normalize();
+
+        Vector3 tangentA = Vector3.Cross(Vector3.up, normal).normalized;
+        Vector3 tangentB = -tangentA;
+
+        if (debugLeftSamples == null || debugLeftSamples.Length != edgeSampleCount)
+        {
+            debugLeftSamples = new Vector3[edgeSampleCount];
+            debugRightSamples = new Vector3[edgeSampleCount];
+        }
+        debugLeftCount = debugRightCount = 0;
+
+        bool foundA = TrySampleEdge(hitPoint, normal, tangentA, finalTarget, ref debugLeftSamples, ref debugLeftCount, out Vector3 bestA, out float scoreA);
+        bool foundB = TrySampleEdge(hitPoint, normal, tangentB, finalTarget, ref debugRightSamples, ref debugRightCount, out Vector3 bestB, out float scoreB);
+
+        if (!foundA && !foundB)
+        {
+            debugHasDetour = false;
+            return false;
+        }
+
+        detourPointOut = (foundA && (!foundB || scoreA >= scoreB)) ? bestA : bestB;
+
+        debugChosenDetour = detourPointOut;
+        debugHasDetour = true;
+        return true;
+    }
+
+    private bool TrySampleEdge(
+        Vector3 hitPoint,
+        Vector3 wallNormal,
+        Vector3 tangentDir,
+        Vector3 finalTarget,
+        ref Vector3[] debugSamples,
+        ref int debugCount,
+        out Vector3 bestPoint,
+        out float bestScore
+    )
+    {
+        bestPoint = Vector3.zero;
+        bestScore = float.NegativeInfinity;
+
+        Vector3 originToCheckFrom = transform.position + Vector3.up * blockRayHeight;
+        Vector3 finalTargetCheck = finalTarget + Vector3.up * blockRayHeight;
+
+        for (int i = 1; i <= edgeSampleCount; i++)
+        {
+            Vector3 candidateOnEdge = hitPoint + tangentDir * (edgeSampleStep * i);
+
+            // Push candidate away from wall
+            Vector3 candidate = candidateOnEdge + wallNormal * edgeOffsetFromWall;
+            candidate.y = transform.position.y;
+
+            if (debugDrawEdgeSamples && debugSamples != null && debugCount < debugSamples.Length)
+                debugSamples[debugCount++] = candidate;
+
+            // Not inside wall
+            if (Physics.CheckSphere(candidate + Vector3.up * 0.5f, 0.2f, obstacleMask))
+                continue;
+
+            // Reachable from enemy (helps stop "behind wall" candidates)
+            Vector3 toCandidate = (candidate + Vector3.up * blockRayHeight) - originToCheckFrom;
+            float distCand = toCandidate.magnitude;
+            if (distCand > 0.01f && Physics.Raycast(originToCheckFrom, toCandidate.normalized, distCand, obstacleMask))
+                continue;
+
+            // Candidate must have LOS to final target
+            Vector3 candOrigin = candidate + Vector3.up * blockRayHeight;
+            Vector3 toFinal = finalTargetCheck - candOrigin;
+            float distFinal = toFinal.magnitude;
+            if (distFinal > 0.01f && Physics.Raycast(candOrigin, toFinal.normalized, distFinal, obstacleMask))
+                continue;
+
+            float score = -Vector3.Distance(candidate, finalTarget);
+            if (score > bestScore)
             {
-                float score = Vector3.Dot(forward, leftDir);
-                if (score > bestScore) { bestScore = score; bestDir = leftDir; }
-            }
-
-            if (!rightBlocked)
-            {
-                float score = Vector3.Dot(forward, rightDir);
-                if (score > bestScore) { bestScore = score; bestDir = rightDir; }
+                bestScore = score;
+                bestPoint = candidate;
             }
         }
 
-        return bestDir;
+        return bestScore > float.NegativeInfinity;
+    }
+
+    // -----------------------------
+    // Wall clearance / slide
+    // -----------------------------
+
+    private Vector3 ResolveWallSlideMove(Vector3 startPos, Quaternion rot, Vector3 desiredMove)
+    {
+        if (desiredMove.sqrMagnitude < 0.000001f)
+            return Vector3.zero;
+
+        float clearance = Mathf.Max(0.001f, wallClearance);
+
+        // Fallback if no capsule
+        if (capsule == null)
+        {
+            Vector3 pos = startPos;
+            Vector3 move = desiredMove;
+
+            Vector3 baseOrigin = startPos + Vector3.up * 0.8f;
+            float radius = 0.35f;
+
+            for (int i = 0; i < slideIterations; i++)
+            {
+                float dist = move.magnitude;
+                if (dist <= 0.0001f) break;
+
+                if (Physics.SphereCast(baseOrigin + (pos - startPos), radius, move.normalized,
+                    out RaycastHit hit, dist + clearance, obstacleMask))
+                {
+                    float safeDist = Mathf.Max(0f, hit.distance - clearance);
+                    Vector3 toContact = move.normalized * safeDist;
+
+                    pos += toContact;
+
+                    Vector3 remaining = move - toContact;
+                    move = Vector3.ProjectOnPlane(remaining, hit.normal);
+                }
+                else
+                {
+                    pos += move;
+                    break;
+                }
+            }
+
+            return pos - startPos;
+        }
+
+        // CapsuleCast using our actual collider size
+        void BuildCapsule(Vector3 pos, out Vector3 p1, out Vector3 p2, out float radius)
+        {
+            float scaleXZ = Mathf.Max(transform.localScale.x, transform.localScale.z);
+            float scaleY = transform.localScale.y;
+
+            radius = capsule.radius * scaleXZ;
+            float height = Mathf.Max(capsule.height * scaleY, radius * 2f);
+            float half = Mathf.Max(0f, (height * 0.5f) - radius);
+
+            Vector3 center = pos + (rot * capsule.center);
+            p1 = center + Vector3.up * half;
+            p2 = center - Vector3.up * half;
+        }
+
+        Vector3 currentPos = startPos;
+        Vector3 moveVec = desiredMove;
+
+        for (int i = 0; i < slideIterations; i++)
+        {
+            float dist = moveVec.magnitude;
+            if (dist <= 0.0001f) break;
+
+            BuildCapsule(currentPos, out Vector3 p1, out Vector3 p2, out float r);
+
+            if (Physics.CapsuleCast(p1, p2, r, moveVec.normalized,
+                out RaycastHit hit, dist + clearance, obstacleMask))
+            {
+                float safeDist = Mathf.Max(0f, hit.distance - clearance);
+                Vector3 toContact = moveVec.normalized * safeDist;
+
+                currentPos += toContact;
+
+                Vector3 remaining = moveVec - toContact;
+                moveVec = Vector3.ProjectOnPlane(remaining, hit.normal);
+            }
+            else
+            {
+                currentPos += moveVec;
+                break;
+            }
+        }
+
+        return currentPos - startPos;
     }
 
     // -----------------------------
@@ -323,15 +498,40 @@ public class EnemyAI : MonoBehaviour
 
         if (!Application.isPlaying) return;
 
-        DrawObstacleAvoidanceGizmosMulti();
         DrawPredictedPathGizmo();
         DrawLastSeenLinks();
 
-        // Show the current move target (what MoveTowards was last called with)
         if (hasDebugMoveTarget)
         {
             Gizmos.color = Color.white;
             Gizmos.DrawWireSphere(debugMoveTarget + Vector3.up * 0.1f, 0.2f);
+        }
+
+        if (usingDetour)
+        {
+            Gizmos.color = new Color(1f, 0.5f, 0f); // orange
+            Gizmos.DrawWireSphere(detourPoint + Vector3.up * 0.1f, 0.25f);
+        }
+
+        // blocked ray
+        Gizmos.color = debugPathBlocked ? Color.red : Color.green;
+        Gizmos.DrawLine(debugBlockRayStart, debugBlockRayEnd);
+
+        // sample points
+        if (debugDrawEdgeSamples)
+        {
+            Gizmos.color = Color.yellow;
+            for (int i = 0; i < debugLeftCount; i++) Gizmos.DrawSphere(debugLeftSamples[i] + Vector3.up * 0.05f, 0.08f);
+
+            Gizmos.color = Color.cyan;
+            for (int i = 0; i < debugRightCount; i++) Gizmos.DrawSphere(debugRightSamples[i] + Vector3.up * 0.05f, 0.08f);
+        }
+
+        // chosen detour
+        if (debugHasDetour)
+        {
+            Gizmos.color = new Color(1f, 0.5f, 0f);
+            Gizmos.DrawWireSphere(debugChosenDetour + Vector3.up * 0.1f, 0.25f);
         }
     }
 
@@ -357,49 +557,14 @@ public class EnemyAI : MonoBehaviour
 
         int segments = 24;
         Vector3 prevPoint = origin + DirFromAngle(-halfAngle) * radius;
-
         for (int i = 1; i <= segments; i++)
         {
             float t = i / (float)segments;
-            float angle = Mathf.Lerp(-halfAngle, halfAngle, t);
-            Vector3 nextPoint = origin + DirFromAngle(angle) * radius;
+            float ang = Mathf.Lerp(-halfAngle, halfAngle, t);
+            Vector3 nextPoint = origin + DirFromAngle(ang) * radius;
             Gizmos.DrawLine(prevPoint, nextPoint);
             prevPoint = nextPoint;
         }
-    }
-
-    private void DrawObstacleAvoidanceGizmosMulti()
-    {
-        Vector3 origin = transform.position + Vector3.up * 0.8f;
-
-        // Forward
-        bool forwardBlocked = Physics.Raycast(origin, debugDesiredDir, avoidRayLength, obstacleMask);
-        Gizmos.color = forwardBlocked ? Color.red : Color.green;
-        Gizmos.DrawRay(origin, debugDesiredDir * avoidRayLength);
-
-        int rays = Mathf.Max(1, sideRaysPerSide);
-
-        for (int i = 1; i <= rays; i++)
-        {
-            float t = i / (float)rays;
-            float angle = Mathf.Lerp(0f, sideRaySpreadAngle, t);
-
-            Vector3 leftDir = Quaternion.AngleAxis(-angle, Vector3.up) * debugDesiredDir;
-            Vector3 rightDir = Quaternion.AngleAxis(angle, Vector3.up) * debugDesiredDir;
-
-            bool leftBlocked = Physics.Raycast(origin, leftDir, avoidRayLength, obstacleMask);
-            bool rightBlocked = Physics.Raycast(origin, rightDir, avoidRayLength, obstacleMask);
-
-            Gizmos.color = leftBlocked ? Color.red : Color.green;
-            Gizmos.DrawRay(origin, leftDir * avoidRayLength);
-
-            Gizmos.color = rightBlocked ? Color.red : Color.green;
-            Gizmos.DrawRay(origin, rightDir * avoidRayLength);
-        }
-
-        // Chosen steering direction
-        Gizmos.color = Color.cyan;
-        Gizmos.DrawRay(origin, debugSteerDir * avoidRayLength);
     }
 
     private void DrawPredictedPathGizmo()
@@ -409,7 +574,6 @@ public class EnemyAI : MonoBehaviour
         Vector3 pos = transform.position;
         Quaternion rot = transform.rotation;
 
-        // IMPORTANT: preview the ACTUAL movement target (set by MoveTowards)
         Vector3 targetPos = hasDebugMoveTarget ? debugMoveTarget : (transform.position + transform.forward * 5f);
 
         Gizmos.color = Color.white;
@@ -421,12 +585,13 @@ public class EnemyAI : MonoBehaviour
             if (toTarget.sqrMagnitude < 0.0001f) break;
 
             Vector3 desiredDir = toTarget.normalized;
-            Vector3 steerDir = GetSteeringDirectionFrom(pos, rot, desiredDir);
 
-            Quaternion targetRot = Quaternion.LookRotation(steerDir, Vector3.up);
+            Quaternion targetRot = Quaternion.LookRotation(desiredDir, Vector3.up);
             rot = Quaternion.RotateTowards(rot, targetRot, turnSpeed * previewTurnSpeedMultiplier * previewStepTime);
 
-            Vector3 nextPos = pos + (rot * Vector3.forward) * (moveSpeed * previewStepTime);
+            Vector3 desiredStep = (rot * Vector3.forward) * (moveSpeed * previewStepTime);
+            Vector3 moved = ResolveWallSlideMove(pos, rot, desiredStep);
+            Vector3 nextPos = pos + moved;
 
             Gizmos.DrawLine(pos + Vector3.up * 0.05f, nextPos + Vector3.up * 0.05f);
             pos = nextPos;

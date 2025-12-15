@@ -1,14 +1,12 @@
-using UnityEngine;
-
-public class StateMachine : MonoBehaviour
+public class StateMachine
 {
     public IState CurrentState { get; private set; }
 
     public void ChangeState(IState newState)
     {
-        if(newState == null)
+        if (newState == null)
         {
-            Debug.LogError("StateMachine is null");
+            UnityEngine.Debug.LogError("StateMachine: newState is null");
             return;
         }
 
@@ -21,5 +19,4 @@ public class StateMachine : MonoBehaviour
     {
         CurrentState?.Tick(deltaTime);
     }
-
 }

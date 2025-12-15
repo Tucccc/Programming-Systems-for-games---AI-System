@@ -21,27 +21,33 @@ public class PatrolState : IState
 
     public void Tick(float deltaTime)
     {
-        if (enemy.CanSeePlayer())
+        // If player is seen, immediately switch to chase
+        if (enemy.debugCanSeePlayer)   // uses the cached vision from EnemyAI.FixedUpdate
         {
             enemy.GoToChase();
             return;
         }
+        
+        index = index % enemy.patrolPoints.Length;
 
-        var points = enemy.patrolPoints;
-        if (points == null || points.Length == 0)
+        if (enemy.patrolPoints.Length == 0)
             return;
 
-        Transform current = points[index];
-        if (current == null)
-            return;
+        Transform current = enemy.patrolPoints[index];
 
-        enemy.MoveTowards(current.position, deltaTime);
+        Vector3 finalTarget = current.position;
 
-        if (enemy.IsAtPosition(current.position))
+        Vector3 moveTarget = enemy.GetMoveTargetWithDetour(finalTarget, deltaTime);
+        enemy.MoveTowards(moveTarget, deltaTime);
+
+        if (enemy.IsAtPosition(finalTarget))
         {
-            index = (index + 1) % points.Length;
+            index = (index + 1) % enemy.patrolPoints.Length;
         }
+
+
     }
+
 
     public void Exit()
     {

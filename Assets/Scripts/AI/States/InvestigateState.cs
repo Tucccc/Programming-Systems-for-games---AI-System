@@ -19,28 +19,25 @@ public class InvestigateState : IState
 
     public void Tick(float deltaTime)
     {
-        // If we see player again, resume chase immediately
-        if (enemy.CanSeePlayer())
+        if (enemy.debugCanSeePlayer)
         {
             enemy.GoToChase();
             return;
         }
 
-        // If we don't even have a last seen position, give up
         if (!enemy.hasLastSeenPos)
         {
             enemy.GoToPatrol();
             return;
         }
 
-        // Move to last seen position
-        enemy.MoveTowards(enemy.lastSeenPlayerPos, deltaTime);
+        Vector3 finalTarget = enemy.lastSeenPlayerPos;
 
-        // Once reached, "search" for a short time then give up
-        if (enemy.IsAtPosition(enemy.lastSeenPlayerPos))
+        Vector3 moveTarget = enemy.GetMoveTargetWithDetour(finalTarget, deltaTime);
+        enemy.MoveTowards(moveTarget, deltaTime);
+
+        if (enemy.IsAtPosition(finalTarget))
         {
-            enemy.FaceTowards(enemy.lastSeenPlayerPos + enemy.transform.forward, deltaTime);
-
             searchTimer += deltaTime;
             if (searchTimer >= enemy.investigateSearchTime)
             {
@@ -48,6 +45,7 @@ public class InvestigateState : IState
             }
         }
     }
+
 
     public void Exit()
     {
