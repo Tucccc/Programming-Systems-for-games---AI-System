@@ -133,6 +133,7 @@ GameObject:
   - component: {fileID: 46381689}
   - component: {fileID: 46381693}
   - component: {fileID: 46381694}
+  - component: {fileID: 46381695}
   m_Layer: 0
   m_Name: Enemy
   m_TagString: Untagged
@@ -184,7 +185,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: c2936b88a3244614e912fcd2705597be, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -250,25 +251,38 @@ MonoBehaviour:
   - {fileID: 150651103}
   - {fileID: 1380234300}
   waypointReachDistance: 0.6
-  lostTimeBeforeReturn: 26.18
-  viewDistance: 15
+  lostTimeBeforeReturn: 5
+  viewDistance: 30
   viewAngle: 180
   obstacleMask:
     serializedVersion: 2
     m_Bits: 64
-  avoidRayLength: 1.5
-  sideRaysPerSide: 1
-  sideRaySpreadAngle: 45
-  steerBias: 0.2
+  wallClearance: 0.15
+  slideIterations: 2
   attackRange: 1.8
   attackCooldown: 0.8
   investigateSearchTime: 2
   lastSeenUpdateDelay: 0.2
+  blockRayHeight: 0.8
+  blockRayMaxDistance: 25
+  edgeSampleStep: 0.25
+  edgeSampleCount: 100
+  edgeOffsetFromWall: 0.35
+  detourExtraSteps: 0
+  detourPointCheckRadius: 2
+  pathClearanceRadius: 0.35
   currentStateName: 
   drawPathPreview: 1
-  previewSteps: 25
+  previewSteps: 67
   previewStepTime: 0.08
   previewTurnSpeedMultiplier: 1
+  debugDrawEdgeSamples: 1
+  enablePlanning: 1
+  replanInterval: 0.25
+  replanTargetMoveThreshold: 0.75
+  maxDetourHops: 3
+  drawPlannedPath: 1
+  plannedPathNodeRadius: 0.12
 --- !u!54 &46381694
 Rigidbody:
   m_ObjectHideFlags: 0
@@ -292,10 +306,33 @@ Rigidbody:
   m_ImplicitCom: 1
   m_ImplicitTensor: 1
   m_UseGravity: 1
-  m_IsKinematic: 1
-  m_Interpolate: 0
-  m_Constraints: 80
-  m_CollisionDetection: 0
+  m_IsKinematic: 0
+  m_Interpolate: 1
+  m_Constraints: 0
+  m_CollisionDetection: 2
+--- !u!136 &46381695
+CapsuleCollider:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 46381688}
+  m_Material: {fileID: 0}
+  m_IncludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ExcludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_LayerOverridePriority: 0
+  m_IsTrigger: 0
+  m_ProvidesContacts: 0
+  m_Enabled: 1
+  serializedVersion: 2
+  m_Radius: 0.5
+  m_Height: 1
+  m_Direction: 1
+  m_Center: {x: 0, y: 0, z: 0}
 --- !u!1 &150651102
 GameObject:
   m_ObjectHideFlags: 0
@@ -695,7 +732,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: 53a4e30eb9ab49b4b9d0412ffd5d5f5a, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -869,7 +906,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: f5028603b2fbf10458e23eda6a0249b6, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -1005,7 +1042,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 0d0be3f65d984b24f81a3883cfacbac2, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  speed: 5
+  speed: 13.2
 --- !u!136 &1430817045
 CapsuleCollider:
   m_ObjectHideFlags: 0
@@ -1052,7 +1089,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: 6b1df8ef2ea4bf9448da282123c5acdd, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
