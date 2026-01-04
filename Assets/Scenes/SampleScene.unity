@@ -265,12 +265,14 @@ MonoBehaviour:
   lastSeenUpdateDelay: 0.2
   blockRayHeight: 0.8
   blockRayMaxDistance: 25
-  edgeSampleStep: 0.25
+  edgeSampleStep: 0.5
   edgeSampleCount: 100
-  edgeOffsetFromWall: 0.35
+  edgeOffsetFromWall: 0.6
+  requireClearPathToFinal: 1
+  toFinalClearanceRadius: 0
   detourExtraSteps: 0
-  detourPointCheckRadius: 2
-  pathClearanceRadius: 0.35
+  detourPointCheckRadius: 0.25
+  pathClearanceRadius: 1
   currentStateName: 
   drawPathPreview: 1
   previewSteps: 67

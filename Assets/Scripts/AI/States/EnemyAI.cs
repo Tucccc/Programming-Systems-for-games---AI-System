@@ -47,13 +47,15 @@ public class EnemyAI : MonoBehaviour
     public float edgeOffsetFromWall = 0.6f;
 
     [Header("Wall-Edge Detour Tuning")]
-    [Range(0, 10)] public int detourExtraSteps = 0;   // 0 = closest valid, 1 = +1 dot, etc.
+    public bool requireClearPathToFinal = true;          // if true, candidate must have LOS to final (or corridor)
+    public float toFinalClearanceRadius = 0.0f;          // 0 = Raycast, >0 = SphereCast
+    [Range(0, 10)] public int detourExtraSteps = 0;      // 0 = closest valid, 1 = +1 dot, etc.
 
     [Header("Detour Point Validation")]
     public float detourPointCheckRadius = 0.25f;
 
     [Header("Path Clearance (prevents hugging walls)")]
-    public float pathClearanceRadius = 0.35f; // how far from walls we want the chosen route to stay
+    public float pathClearanceRadius = 0.15f; // how far from walls we want the chosen route to stay
 
     [Header("Debug")]
     public string currentStateName;
@@ -139,7 +141,7 @@ public class EnemyAI : MonoBehaviour
 
     private void Start()
     {
-        if (player == null)
+        if (player == null) 
             Debug.LogWarning("EnemyAI: Player reference not set. Drag Player into EnemyAI inspector.");
 
         if (patrolPoints == null || patrolPoints.Length == 0)
@@ -366,79 +368,106 @@ public class EnemyAI : MonoBehaviour
         return true;
     }
 
-    private bool TrySampleEdge(
-        Vector3 hitPoint,
-        Vector3 wallNormal,
-        Vector3 tangentDir,
-        Vector3 finalTarget,
-        ref Vector3[] debugSamples,
-        ref int debugCount,
-        out Vector3 chosenPoint,
-        out float chosenScore
-    )
+private bool TrySampleEdge(
+    Vector3 hitPoint,
+    Vector3 wallNormal,
+    Vector3 tangentDir,
+    Vector3 finalTarget,
+    ref Vector3[] debugSamples,
+    ref int debugCount,
+    out Vector3 chosenPoint,
+    out float chosenScore
+)
+{
+    chosenPoint = Vector3.zero;
+    chosenScore = float.NegativeInfinity;
+
+    Vector3 enemyOrigin = transform.position + Vector3.up * blockRayHeight;
+    Vector3 finalTargetCheck = finalTarget + Vector3.up * blockRayHeight;
+
+    // Store valid candidates in order (closest -> further)
+    Vector3[] valid = new Vector3[edgeSampleCount];
+    int validCount = 0;
+
+    for (int i = 1; i <= edgeSampleCount; i++)
     {
-        chosenPoint = Vector3.zero;
-        chosenScore = float.NegativeInfinity;
+        Vector3 candidateOnEdge = hitPoint + tangentDir * (edgeSampleStep * i);
 
-        Vector3 enemyOrigin = transform.position + Vector3.up * blockRayHeight;
-        Vector3 finalTargetCheck = finalTarget + Vector3.up * blockRayHeight;
+        // Push candidate away from wall (flip if needed so we offset into open space)
+        Vector3 candidate = candidateOnEdge + wallNormal * edgeOffsetFromWall;
 
-        // Store valid candidates in order (closest -> further)
-        Vector3[] valid = new Vector3[edgeSampleCount];
-        int validCount = 0;
+        Vector3 fromWallToEnemy = transform.position - hitPoint;
+        fromWallToEnemy.y = 0f;
 
-        for (int i = 1; i <= edgeSampleCount; i++)
+        if (Vector3.Dot(fromWallToEnemy, wallNormal) < 0f)
+            candidate = candidateOnEdge - wallNormal * edgeOffsetFromWall;
+
+        candidate.y = transform.position.y;
+
+        // Debug dots
+        if (debugDrawEdgeSamples && debugSamples != null && debugCount < debugSamples.Length)
+            debugSamples[debugCount++] = candidate;
+
+        // 1) Not inside wall
+        if (Physics.CheckSphere(candidate + Vector3.up * 0.5f, detourPointCheckRadius, obstacleMask))
+            continue;
+
+        // 2) Enemy -> Candidate must be reachable WITH CLEARANCE (corridor)
         {
-            Vector3 candidateOnEdge = hitPoint + tangentDir * (edgeSampleStep * i);
-
-            // Push candidate away from wall (flip if needed so we offset into open space)
-            Vector3 candidate = candidateOnEdge + wallNormal * edgeOffsetFromWall;
-
-            Vector3 fromWallToEnemy = transform.position - hitPoint;
-            fromWallToEnemy.y = 0f;
-
-            if (Vector3.Dot(fromWallToEnemy, wallNormal) < 0f)
-                candidate = candidateOnEdge - wallNormal * edgeOffsetFromWall;
-
-            candidate.y = transform.position.y;
-
-            // Debug dots
-            if (debugDrawEdgeSamples && debugSamples != null && debugCount < debugSamples.Length)
-                debugSamples[debugCount++] = candidate;
-
-            // 1) Not inside wall
-            if (Physics.CheckSphere(candidate + Vector3.up * 0.5f, detourPointCheckRadius, obstacleMask))
-                continue;
-
-            // 2) Enemy -> Candidate must be reachable WITH CLEARANCE (SphereCast corridor)
             Vector3 toCandidate = (candidate + Vector3.up * blockRayHeight) - enemyOrigin;
             float distCand = toCandidate.magnitude;
-            if (distCand > 0.01f && Physics.SphereCast(enemyOrigin, pathClearanceRadius, toCandidate.normalized, out _, distCand, obstacleMask))
-                continue;
 
-            // 3) Candidate -> FinalTarget should ALSO be clear WITH CLEARANCE (prevents hugging wall on next leg)
+            if (distCand > 0.01f)
+            {
+                if (Physics.SphereCast(enemyOrigin, pathClearanceRadius, toCandidate.normalized, out _, distCand, obstacleMask))
+                    continue;
+            }
+        }
+
+        // 3) Candidate -> FinalTarget clearance check (OPTIONAL)
+        if (requireClearPathToFinal)
+        {
             Vector3 candOrigin = candidate + Vector3.up * blockRayHeight;
             Vector3 toFinal = finalTargetCheck - candOrigin;
             float distFinal = toFinal.magnitude;
-            if (distFinal > 0.01f && Physics.SphereCast(candOrigin, pathClearanceRadius, toFinal.normalized, out _, distFinal, obstacleMask))
-                continue;
 
-            valid[validCount++] = candidate;
+            if (distFinal > 0.01f)
+            {
+                bool blocked;
 
-            if (validCount >= edgeSampleCount)
-                break;
+                // If radius is 0 -> simple LOS raycast (lets you pick closer points)
+                if (toFinalClearanceRadius <= 0f)
+                {
+                    blocked = Physics.Raycast(candOrigin, toFinal.normalized, distFinal, obstacleMask);
+                }
+                else
+                {
+                    blocked = Physics.SphereCast(candOrigin, toFinalClearanceRadius, toFinal.normalized, out _, distFinal, obstacleMask);
+                }
+
+                if (blocked)
+                    continue;
+            }
         }
 
-        if (validCount == 0)
-            return false;
+        // Candidate is valid
+        valid[validCount++] = candidate;
 
-        // Choose closest valid (index 0) + extra steps
-        int idx = Mathf.Clamp(detourExtraSteps, 0, validCount - 1);
-        chosenPoint = valid[idx];
-
-        chosenScore = -Vector3.Distance(chosenPoint, finalTarget);
-        return true;
+        if (validCount >= edgeSampleCount)
+            break;
     }
+
+    if (validCount == 0)
+        return false;
+
+    // Choose closest valid (index 0) + extra steps
+    int idx = Mathf.Clamp(detourExtraSteps, 0, validCount - 1);
+    chosenPoint = valid[idx];
+
+    chosenScore = -Vector3.Distance(chosenPoint, finalTarget);
+    return true;
+}
+
 
     // -----------------------------
     // Wall clearance / slide
