@@ -47,10 +47,9 @@ public class EnemyAI : MonoBehaviour
     public float edgeOffsetFromWall = 0.6f;
 
     [Header("Wall-Edge Detour Tuning")]
-    public bool requireClearPathToFinal = true;          // if true, candidate must have LOS to final (or corridor)
-    public float toFinalClearanceRadius = 0.0f;          // 0 = Raycast, >0 = SphereCast
-    [Range(0, 10)] public int detourExtraSteps = 0;      // 0 = closest valid, 1 = +1 dot, etc.
-
+    public bool requireClearPathToFinal = true;        
+    public float toFinalClearanceRadius = 0.0f;         
+    [Range(0, 10)] public int detourExtraSteps = 0;      
     [Header("Detour Point Validation")]
     public float detourPointCheckRadius = 0.25f;
 
